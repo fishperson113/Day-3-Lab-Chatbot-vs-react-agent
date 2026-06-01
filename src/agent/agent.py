@@ -1,5 +1,5 @@
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from src.core.llm_provider import LLMProvider
 from src.telemetry.logger import logger
 from src.tools.retail_tools import TOOLS_MAPPING
@@ -38,6 +38,7 @@ Quy tắc:
 
         current_prompt = user_input
         steps = 0
+        self.history = []
 
         while steps < self.max_steps:
             result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
@@ -67,6 +68,7 @@ Quy tắc:
                     "observation": observation
                 })
 
+                self.history.append({"step": steps + 1, "tool": tool_name, "args": args, "observation": observation})
                 current_prompt += f"\n{text}\nObservation: {observation}"
             else:
                 logger.log_event("AGENT_END", {"steps": steps + 1, "result": text})
@@ -81,7 +83,13 @@ Quy tắc:
         if tool_name not in TOOLS_MAPPING:
             return f"Tool '{tool_name}' không tồn tại."
         try:
-            arg_list = [a.strip() for a in args.split(",")]
+            arg_list = []
+            for a in args.split(","):
+                a = a.strip()
+                try:
+                    arg_list.append(float(a))
+                except ValueError:
+                    arg_list.append(a)
             if len(arg_list) == 1:
                 return TOOLS_MAPPING[tool_name](arg_list[0])
             return TOOLS_MAPPING[tool_name](*arg_list)
