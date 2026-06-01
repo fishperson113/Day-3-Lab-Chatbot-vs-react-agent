@@ -5,36 +5,32 @@ Welcome to Phase 3 of the Agentic AI course! This lab focuses on moving from a s
 ## 🚀 Getting Started
 
 ### 1. Setup Environment
-Copy the `.env.example` to `.env` and fill in your API keys:
+Copy the `.env.example` to `.env` and configure your provider.
 ```bash
 cp .env.example .env
 ```
 
-### 2. Install Dependencies
+### 2. Install Dependencies (using `uv`)
 ```bash
-pip install -r requirements.txt
+# Cài đặt dependencies nhanh với uv
+uv pip install -r requirements.txt
 ```
 
-### 3. Directory Structure
-- `src/tools/`: Extension point for your custom tools.
+### 3. Hugging Face Authentication (Bắt buộc cho Gemma 3)
+Gemma 3 là model bị giới hạn (Gated Model). Bạn cần:
+1. Truy cập [Hugging Face Gemma-3-1b-it](https://huggingface.co/google/gemma-3-1b-it) và nhấn **Acknowledge license**.
+2. Tạo Access Token tại [HF Settings](https://huggingface.co/settings/tokens).
+3. Đăng nhập ở terminal:
+```bash
+uv run hf auth login
+```
 
-## 🏠 Running with Local Models (CPU)
-
-If you don't want to use OpenAI or Gemini, you can run open-source models (like Phi-3) directly on your CPU using `llama-cpp-python`.
-
-### 1. Download the Model
-Download the **Phi-3-mini-4k-instruct-q4.gguf** (approx 2.2GB) from Hugging Face:
-- [Phi-3-mini-4k-instruct-GGUF](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf)
-- Direct Download: [phi-3-mini-4k-instruct-q4.gguf](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf)
-
-### 2. Place Model in Project
-Create a `models/` folder in the root and move the downloaded `.gguf` file there.
-
-### 3. Update `.env`
-Change your `DEFAULT_PROVIDER` and set the path:
-```env
-DEFAULT_PROVIDER=local
-LOCAL_MODEL_PATH=./models/Phi-3-mini-4k-instruct-q4.gguf
+### 4. Running the Lab
+Sử dụng `main.py` làm entry point:
+```bash
+uv run main.py chatbot    # Chạy Chatbot Baseline
+uv run main.py agent      # Chạy ReAct Agent
+uv run main.py eval       # Chạy Test Suite
 ```
 
 ## 🎯 Lab Objectives
