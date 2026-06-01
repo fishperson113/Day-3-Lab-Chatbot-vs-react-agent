@@ -6,6 +6,49 @@
 
 ---
 
+## 🔧 Setup Guide (dùng `uv`)
+
+### 1. Cài `uv` (nếu chưa có)
+
+```bash
+# Windows (PowerShell)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Kiểm tra:
+```bash
+uv --version
+```
+
+### 2. Cài dependencies & Config `.env`
+
+```bash
+# 1. Cài dependencies
+uv pip install -r requirements.txt
+
+# 2. Tạo file .env từ template
+cp .env.example .env
+```
+
+Mở file `.env` và đảm bảo các dòng sau được thiết lập:
+```env
+# Dùng hf để tải model tự động từ Hugging Face
+DEFAULT_PROVIDER=hf
+HF_MODEL_ID=google/gemma-3-1b-it
+```
+
+### 3. Chạy thử
+
+```bash
+# Sau khi có model + .env, chạy test
+python tests/test_local.py
+```
+
+---
+
 ## 🧠 Luồng ReAct cần triển khai
 
 ```
@@ -122,17 +165,18 @@ graph TD
 ### Setup Person — Gemma 3 1B (bạn)
 
 **Nhiệm vụ:**
-1. Download Gemma 3 1B GGUF (khoảng ~700MB — rất nhẹ) từ Hugging Face
-   - File: `gemma-3-1b-it-Q4_K_M.gguf` (hoặc phiên bản Q4 tương tự)
-2. Đặt vào thư mục `models/`
-3. Config `.env`:
+1. Cấu hình dùng `src/core/hf_provider.py` để tự động tải model từ Hugging Face
+   - Không cần tải file thủ công, model sẽ được cache ở `~/.cache/huggingface`
+   - Nhắc mọi người chạy: `uv pip install torch transformers accelerate`
+2. Config `.env`:
    ```env
-   DEFAULT_PROVIDER=local
-   LOCAL_MODEL_PATH=./models/gemma-3-1b-it-Q4_K_M.gguf
+   DEFAULT_PROVIDER=hf
+   HF_MODEL_ID=google/gemma-3-1b-it
    ```
-4. Chạy thử `test_local.py` để verify model chạy được
-5. Tối ưu System Prompt & Tool Descriptions cho Gemma 3 1B (ngắn, ít few-shot)
-6. Hỗ trợ Person A sửa prompt khi loop không hoạt động
+3. Chạy thử script test để verify model chạy được
+4. Tối ưu System Prompt & Tool Descriptions cho Gemma 3 1B (ngắn, ít few-shot)
+5. Hỗ trợ Person A sửa prompt khi loop không hoạt động
+
 
 ---
 
