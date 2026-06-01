@@ -1,5 +1,5 @@
 """
-Simple CLI for Lab 3
+Simple CLI for Lab 3 (Zero Setup via Hugging Face)
 Usage: python main.py [chatbot|agent]
 """
 import os
@@ -18,6 +18,7 @@ def run():
     mode = sys.argv[1] if len(sys.argv) > 1 else "chatbot"
 
     # [Inject Interface]
+    # Automatically downloads model from HF if not cached
     llm = HFProvider(model_id=os.getenv("HF_MODEL_ID", "google/gemma-3-1b-it"))
 
     if mode == "agent":
@@ -30,7 +31,7 @@ def run():
     else:
         worker = SimpleChatbot(llm=llm)
 
-    print(f"--- Running in {mode} mode ---")
+    print(f"--- Running {mode} mode (Model: {os.getenv('HF_MODEL_ID', 'google/gemma-3-1b-it')}) ---")
     while True:
         try:
             user_input = input("You: ")
