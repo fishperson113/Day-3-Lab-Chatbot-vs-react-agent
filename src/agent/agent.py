@@ -53,7 +53,7 @@ Quy tắc:
 
             if "Final Answer:" in text:
                 final = text.split("Final Answer:")[-1].strip()
-                logger.log_event("AGENT_END", {"steps": steps + 1, "result": final})
+                logger.log_event("AGENT_END", {"steps": steps + 1, "loop_count": steps + 1, "result": final, "status": "success"})
                 return final
 
             action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", text, re.DOTALL)
@@ -71,12 +71,13 @@ Quy tắc:
                 self.history.append({"step": steps + 1, "tool": tool_name, "args": args, "observation": observation})
                 current_prompt += f"\n{text}\nObservation: {observation}"
             else:
-                logger.log_event("AGENT_END", {"steps": steps + 1, "result": text})
+                logger.log_event("AGENT_PARSE_ERROR", {"step": steps + 1, "text": text, "status": "parse_error"})
+                logger.log_event("AGENT_END", {"steps": steps + 1, "loop_count": steps + 1, "result": text, "status": "parse_error"})
                 return text
 
             steps += 1
 
-        logger.log_event("AGENT_END", {"steps": steps, "status": "max_steps_reached"})
+        logger.log_event("AGENT_END", {"steps": steps, "loop_count": steps, "status": "max_steps_reached"})
         return "Đã đạt giới hạn bước suy luận. Không tìm được câu trả lời hoàn chỉnh."
 
     def _execute_tool(self, tool_name: str, args: str) -> str:
