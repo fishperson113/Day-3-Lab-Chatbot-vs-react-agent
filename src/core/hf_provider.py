@@ -56,8 +56,9 @@ class HFProvider(LLMProvider):
         with torch.inference_mode():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=1024,
-                do_sample=False
+                max_new_tokens=256,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id
             )
 
         end_time = time.time()

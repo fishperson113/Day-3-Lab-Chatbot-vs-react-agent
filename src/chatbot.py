@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.core.llm_provider import LLMProvider
-
+from src.telemetry.logger import logger
+from src.telemetry.metrics import recorder
 
 class SimpleChatbot:
     """
@@ -21,52 +22,52 @@ class SimpleChatbot:
         self.llm = llm
 
     def run(self, user_input: str) -> dict:
-        start = time.time()
+        start_time = time.time()
+        logger.log_event("CHATBOT_START", {"input": user_input, "model": self.llm.model_name})
 
-        print("=" * 50)
-        print("[CHATBOT] START")
-        print(f"User: {user_input}")
+        system_prompt = """Bạn là nhân viên bán hàng.
+Luật:
+1. Trả lời cực kỳ NGẮN GỌN (dưới 3 câu).
+2. Nếu không có thông tin đơn hàng, hãy từ chối ngay. Không suy đoán, không dông dài.
 
-        response = self.llm.generate(user_input)
+Mẫu 1:
+User: Đơn ORD123 nặng bao nhiêu?
+Assistant: Tôi không có quyền truy cập hệ thống để xem đơn hàng này.
 
-        print(f"Assistant: {response}")
-        print("[CHATBOT] END")
-        print("=" * 50)
+Mẫu 2:
+User: 1 + 1 bằng mấy?
+Assistant: 1 + 1 bằng 2."""
 
-        latency_ms = int((time.time() - start) * 1000)
+        result = self.llm.generate(user_input, system_prompt=system_prompt)
+        response_text = result.get("content", str(result))
+        latency_ms = int((time.time() - start_time) * 1000)
 
-        return {
-            "question": user_input,
-            "response": response,
+        usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        cost = recorder.calculate_cost(self.llm.model_name, usage["prompt_tokens"], usage["completion_tokens"])
+
+        # Record trace for evaluation
+        trace = {
+            "mode": "chatbot",
+            "model": self.llm.model_name,
+            "input": user_input,
+            "response": response_text,
             "latency_ms": latency_ms,
+            "prompt_tokens": usage["prompt_tokens"],
+            "completion_tokens": usage["completion_tokens"],
+            "total_tokens": usage["total_tokens"],
+            "cost_estimate": cost,
+            "steps": 1,
+            "status": "success"
         }
+        recorder.record(trace)
+        logger.log_event("CHATBOT_END", {"model": self.llm.model_name})
 
+        return trace
 
 if __name__ == "__main__":
     load_dotenv()
-
-    from src.core.openai_provider import OpenAIProvider
-    from src.core.gemini_provider import GeminiProvider
-    from src.core.local_provider import LocalProvider
-
-    provider = os.getenv("DEFAULT_PROVIDER", "local").lower()
-
-    if provider == "openai":
-        llm = OpenAIProvider()
-    elif provider == "gemini":
-        llm = GeminiProvider()
-    else:
-        llm = LocalProvider()
-
-    chatbot = SimpleChatbot(llm)
-
-    while True:
-        user_input = input("\nYou: ")
-
-        if user_input.lower() in ["exit", "quit"]:
-            break
-
-        result = chatbot.run(user_input)
-
-        print(f"\nBot: {result['response']}")
-        print(f"Latency: {result['latency_ms']} ms")
+    # Simple test
+    from src.core.hf_provider import HFProvider
+    llm = HFProvider()
+    bot = SimpleChatbot(llm)
+    print(bot.run("ORD123 nặng bao nhiêu?"))

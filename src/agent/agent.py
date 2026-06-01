@@ -1,99 +1,125 @@
 import re
+import time
+import uuid
 from typing import List, Dict, Any
 from src.core.llm_provider import LLMProvider
 from src.telemetry.logger import logger
+from src.telemetry.metrics import recorder
+from src.telemetry.trace_tree import trace_logger
 from src.tools.retail_tools import TOOLS_MAPPING
 
 class ReActAgent:
-    """
-    ReAct-style Agent that follows the Thought-Action-Observation loop.
-    """
-
     def __init__(self, llm: LLMProvider, tools: List[Dict[str, Any]], max_steps: int = 5):
         self.llm = llm
         self.tools = tools
         self.max_steps = max_steps
-        self.history = []
+        self.memory = []
+        self.max_memory_turns = 3
 
     def get_system_prompt(self) -> str:
-        tool_descriptions = "\n".join([f"- {t['name']}: {t['description']}" for t in self.tools])
-        return f"""Bạn là trợ lý bán lẻ thông minh. Bạn có các công cụ sau:
+        tool_desc = "\n".join([f"- {t['name']}: {t['description']}" for t in self.tools])
+        return f"""Tools: {tool_desc}
 
-{tool_descriptions}
+You ONLY respond in these formats:
+1. If tool needed: Action: tool_name|argument
+2. If answering: Final Answer: your response
 
-Hãy sử dụng đúng định dạng sau:
-Thought: suy nghĩ về bước tiếp theo
-Action: ten_tool(doi_so)
-Observation: kết quả từ tool (hệ thống cung cấp)
-... (lặp lại nếu cần thêm thông tin)
-Final Answer: câu trả lời cuối cùng
+STRICT RULES:
+- Never add extra text after Action
+- Use the Observation provided by system
+- Always end with Final Answer once you have info
 
-Quy tắc:
-- Luôn bắt đầu bằng Thought
-- Chỉ gọi 1 Action mỗi bước
-- Kết thúc bằng Final Answer khi đã đủ thông tin"""
+Example:
+User: How heavy is order ORD123?
+Action: get_order_weight|ORD123
+Observation: 1.0 kg
+Final Answer: Order ORD123 weighs 1.0 kg.
 
-    def run(self, user_input: str) -> str:
-        logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
+Begin!"""
 
-        current_prompt = user_input
+    def _build_prompt(self, user_input: str) -> str:
+        prompt = ""
+        if self.memory:
+            prompt += "Recent history:\n"
+            for turn in self.memory[-self.max_memory_turns:]:
+                prompt += f"User: {turn['user']}\n{turn['agent']}\n\n"
+        prompt += f"User: {user_input}\n"
+        return prompt
+
+    def run(self, user_input: str) -> dict:
+        start_time = time.time()
+        trace_id = str(uuid.uuid4())
+        tree = trace_logger.start_trace(trace_id, user_input, "agent", self.llm.model_name)
+
+        current_prompt = self._build_prompt(user_input)
         steps = 0
-        self.history = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        final_response = "Sorry, I cannot answer that."
 
-        while steps < self.max_steps:
-            result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
-            text = result["content"]
+        try:
+            while steps < self.max_steps:
+                # LLM Call
+                raw_result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
+                llm_output = raw_result["content"].strip()
 
-            logger.log_event("AGENT_STEP", {
-                "step": steps + 1,
-                "output": text,
-                "latency_ms": result.get("latency_ms", 0),
-                "tokens": result.get("usage", {})
-            })
+                usage = raw_result.get("usage", {})
+                p_tokens = usage.get("prompt_tokens", 0)
+                c_tokens = usage.get("completion_tokens", 0)
+                total_prompt_tokens += p_tokens
+                total_completion_tokens += c_tokens
 
-            if "Final Answer:" in text:
-                final = text.split("Final Answer:")[-1].strip()
-                logger.log_event("AGENT_END", {"steps": steps + 1, "loop_count": steps + 1, "result": final, "status": "success"})
-                return final
+                # Trace step
+                tree.add_step(llm_output, raw_result.get("latency_ms", 0), p_tokens, c_tokens)
 
-            action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", text, re.DOTALL)
-            if action_match:
-                tool_name = action_match.group(1).strip()
-                args = action_match.group(2).strip()
-                observation = self._execute_tool(tool_name, args)
+                # Final Answer check
+                if "Final Answer:" in llm_output:
+                    final_response = llm_output.split("Final Answer:")[-1].strip()
+                    tree.add_final_answer(final_response)
+                    break
 
-                logger.log_event("TOOL_CALL", {
-                    "tool": tool_name,
-                    "args": args,
-                    "observation": observation
-                })
+                # Action check
+                action_match = re.search(r"Action:\s*(\w+)\|(.+)", llm_output)
+                if action_match:
+                    tool_name = action_match.group(1).strip()
+                    tool_args = action_match.group(2).split("\n")[0].strip()
 
-                self.history.append({"step": steps + 1, "tool": tool_name, "args": args, "observation": observation})
-                current_prompt += f"\n{text}\nObservation: {observation}"
-            else:
-                logger.log_event("AGENT_PARSE_ERROR", {"step": steps + 1, "text": text, "status": "parse_error"})
-                logger.log_event("AGENT_END", {"steps": steps + 1, "loop_count": steps + 1, "result": text, "status": "parse_error"})
-                return text
+                    tree.add_action(tool_name, tool_args)
+                    observation = self._execute_tool(tool_name, tool_args)
+                    tree.add_observation(observation)
 
-            steps += 1
+                    current_prompt += f"Action: {tool_name}|{tool_args}\nObservation: {observation}\n"
+                    steps += 1
+                    continue
 
-        logger.log_event("AGENT_END", {"steps": steps, "loop_count": steps, "status": "max_steps_reached"})
-        return "Đã đạt giới hạn bước suy luận. Không tìm được câu trả lời hoàn chỉnh."
+                final_response = llm_output if len(llm_output) > 3 else final_response
+                break
+
+        except Exception as e:
+            tree.mark_error(str(e))
+            final_response = f"Agent Error: {str(e)}"
+
+        total_latency = int((time.time() - start_time) * 1000)
+        cost = recorder.calculate_cost(self.llm.model_name, total_prompt_tokens, total_completion_tokens)
+        tree.finalize(total_latency, total_prompt_tokens + total_completion_tokens, cost)
+        trace_logger.end_trace(trace_id)
+
+        # Record metrics
+        trace_meta = {
+            "mode": "agent", "model": self.llm.model_name, "input": user_input,
+            "response": final_response, "latency_ms": total_latency,
+            "total_tokens": total_prompt_tokens + total_completion_tokens,
+            "cost_estimate": cost, "steps": steps, "status": "success", "trace_id": trace_id
+        }
+        recorder.record(trace_meta)
+
+        self.memory.append({"user": user_input, "agent": f"Response: {final_response}"})
+        return trace_meta
 
     def _execute_tool(self, tool_name: str, args: str) -> str:
-        if tool_name not in TOOLS_MAPPING:
-            return f"Tool '{tool_name}' không tồn tại."
-        try:
-            arg_list = []
-            for a in args.split(","):
-                a = a.strip()
-                try:
-                    arg_list.append(float(a))
-                except ValueError:
-                    arg_list.append(a)
-            if len(arg_list) == 1:
-                return TOOLS_MAPPING[tool_name](arg_list[0])
-            return TOOLS_MAPPING[tool_name](*arg_list)
-        except Exception as e:
-            logger.error(f"Tool error: {str(e)}")
-            return f"Lỗi khi gọi tool: {str(e)}"
+        if tool_name not in TOOLS_MAPPING: return f"Error: Unknown tool '{tool_name}'."
+        try: return TOOLS_MAPPING[tool_name](args)
+        except Exception as e: return f"Error: {str(e)}"
+
+    def clear_memory(self):
+        self.memory = []

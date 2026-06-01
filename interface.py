@@ -1,254 +1,174 @@
 import os
 import sys
-from pathlib import Path
-
 import streamlit as st
-from dotenv import load_dotenv
-
-load_dotenv()
-
-ROOT_DIR = Path(__file__).resolve().parent
-SRC_DIR = ROOT_DIR / "src"
-sys.path.append(str(SRC_DIR))
-
-from src.chatbot import SimpleChatbot
+from main import create_worker, TOOLS
 from src.agent.agent import ReActAgent
-from src.tools.retail_tools import TOOLS_MAPPING
-from src.core.hf_provider import HFProvider
+from src.chatbot import SimpleChatbot
+from src.telemetry.metrics import recorder
+from src.telemetry.trace_tree import trace_logger
 
-AVAILABLE_PROVIDERS = ["hf", "local", "openai", "gemini"]
-AVAILABLE_MODES = ["chatbot", "agent"]
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.abspath(__name__)))
 
-TOOLS = [
-    {"name": "get_order_weight", "description": "Lấy cân nặng đơn hàng", "function": TOOLS_MAPPING["get_order_weight"]},
-    {"name": "calculate_shipping", "description": "Tính phí ship", "function": TOOLS_MAPPING["calculate_shipping"]},
-    {"name": "check_stock", "description": "Kiểm tra tồn kho", "function": TOOLS_MAPPING["check_stock"]}
-]
+def initialize_session(mode: str, provider: str):
+    with st.spinner(f"Loading {mode.upper()} mode with {provider.upper()}..."):
+        worker = create_worker(mode, provider)
+        st.session_state.worker = worker
+        st.session_state.mode = mode
+        st.session_state.provider = provider
+        st.session_state.history = []
+        st.session_state.session_ready = True
+        if isinstance(worker, ReActAgent):
+            worker.clear_memory()
 
+def render_node(node):
+    icon = "🤖" if node["type"] == "llm_call" else "🛠️" if node["type"] == "action" else "👁️" if node["type"] == "observation" else "✅"
+    label = f"{icon} {node['name']}"
+    if "latency_ms" in node and node["latency_ms"] > 0:
+        label += f" ({node['latency_ms']}ms)"
 
-def build_provider(provider_name: str, local_model_path: str | None = None):
-    provider = provider_name.lower()
-    if provider == "hf":
-        return HFProvider(model_id=os.getenv("HF_MODEL_ID", "google/gemma-3-1b-it"))
+    with st.expander(label, expanded=(node["type"] in ["action", "final_answer"])):
+        if node["type"] == "llm_call":
+            st.code(node["output"])
+            if "prompt_tokens" in node:
+                st.caption(f"Tokens: {node['prompt_tokens']} prompt + {node['completion_tokens']} completion")
+        elif node["type"] == "action":
+            st.info(f"Arguments: `{node['args']}`")
+        elif node["type"] == "observation":
+            st.success(node["result"])
+        elif node["type"] == "final_answer":
+            st.write(node["content"])
 
-    if provider == "openai":
-        from src.core.openai_provider import OpenAIProvider
-        return OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY"))
+        if "children" in node:
+            for child in node["children"]:
+                render_node(child)
 
-    if provider == "gemini":
-        from src.core.gemini_provider import GeminiProvider
-        return GeminiProvider(api_key=os.getenv("GOOGLE_API_KEY"))
+def render_chat():
+    st.write("Using Gemma 3 1B (Local) or GPT-5 (NineRouter).")
+    for chat in st.session_state.history:
+        with st.chat_message("user"):
+            st.markdown(chat["user"])
+        with st.chat_message("assistant"):
+            st.markdown(chat["ai"])
+            st.caption(f"Latency: {chat['latency']}ms | Steps: {chat['steps']}")
 
-    if provider == "local":
-        from src.core.local_provider import LocalProvider
-        model_path = local_model_path or os.getenv("LOCAL_MODEL_PATH")
-        if not model_path:
-            raise ValueError("Local model path is required for the local provider.")
-        return LocalProvider(model_path=model_path)
+    if prompt := st.chat_input("Ask a question..."):
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                try:
+                    result = st.session_state.worker.run(prompt)
+                    response = result.get("response", str(result))
+                    latency = result.get("latency_ms", 0)
+                    steps = result.get("steps", 0)
+                    st.markdown(response)
+                    st.caption(f"Latency: {latency}ms | Steps: {steps}")
+                    st.session_state.history.append({
+                        "user": prompt, "ai": response, "latency": latency, "steps": steps
+                    })
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
 
-    raise ValueError(f"Unknown provider '{provider_name}'")
+def render_comparison():
+    st.header("🆚 Chatbot vs Agent Comparison")
+    st.write("Compare results for the exact same input.")
 
-
-def build_worker(mode: str, llm):
-    if mode == "agent":
-        return ReActAgent(llm=llm, tools=TOOLS)
-    return SimpleChatbot(llm=llm)
-
-
-def initialize_session(provider: str, mode: str, local_path: str | None = None):
-    llm = build_provider(provider, local_path)
-    worker = build_worker(mode, llm)
-    st.session_state.provider = provider
-    st.session_state.mode = mode
-    st.session_state.worker = worker
-    st.session_state.history = []
-    st.session_state.session_ready = True
-
-
-def clear_session():
-    st.session_state.provider = None
-    st.session_state.mode = None
-    st.session_state.worker = None
-    st.session_state.history = []
-    st.session_state.session_ready = False
-    st.session_state.status_message = ""
-    st.session_state.error_message = ""
-    st.session_state.local_model_path = ""
-
-
-def ensure_state():
-    if "provider" not in st.session_state:
-        clear_session()
-    if "status_message" not in st.session_state:
-        st.session_state.status_message = ""
-    if "error_message" not in st.session_state:
-        st.session_state.error_message = ""
-    if "local_model_path" not in st.session_state:
-        st.session_state.local_model_path = ""
-    if "input_message" not in st.session_state:
-        st.session_state.input_message = ""
-
-
-def inject_styles():
-    st.markdown(
-        """
-        <style>
-        .streamlit-expanderHeader {
-            font-size: 1.05rem !important;
-        }
-        .css-18ni7ap.e8zbici2 {
-            padding: 0 !important;
-        }
-        .card {
-            border-radius: 24px;
-            background: #ffffff;
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
-            padding: 24px;
-            margin-bottom: 24px;
-        }
-        .chat-bubble {
-            border-radius: 20px;
-            padding: 18px;
-            margin-bottom: 16px;
-            line-height: 1.65;
-        }
-        .chat-user {
-            background: #eef2ff;
-            border: 1px solid #c7d2fe;
-        }
-        .chat-ai {
-            background: #fff7ed;
-            border: 1px solid #fed7aa;
-        }
-        .chat-meta {
-            color: #475569;
-            font-size: 0.92rem;
-            margin-top: 10px;
-        }
-        .status-pill {
-            display: inline-flex;
-            align-items: center;
-            padding: 8px 14px;
-            border-radius: 999px;
-            background: #eff6ff;
-            color: #1d4ed8;
-            font-weight: 700;
-            margin-right: 10px;
-            margin-bottom: 12px;
-        }
-        .headline {
-            font-size: clamp(2rem, 2.2vw, 2.6rem);
-            margin-bottom: 10px;
-        }
-        .subtext {
-            color: #475569;
-            margin-bottom: 18px;
-        }
-        .streamlit-button {
-            border-radius: 14px !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_sidebar():
-    with st.sidebar:
-        st.header("Session setup")
-        provider = st.selectbox("Provider", AVAILABLE_PROVIDERS, index=0)
-        mode = st.selectbox("Mode", AVAILABLE_MODES, index=0)
-        local_model_path = st.text_input(
-            "Local model path (.gguf)",
-            value=st.session_state.local_model_path,
-            placeholder="/path/to/model.gguf",
-        )
-
-        if st.button("Initialize session"):
-            try:
-                initialize_session(provider, mode, local_model_path if local_model_path else None)
-                st.session_state.status_message = f"Loaded {mode.upper()} with {provider.upper()} successfully."
-                st.session_state.error_message = ""
-            except Exception as exc:
-                st.session_state.error_message = str(exc)
-                st.session_state.status_message = ""
-
-        if st.button("Reset session"):
-            clear_session()
-
-        if st.session_state.error_message:
-            st.error(st.session_state.error_message)
-        elif st.session_state.status_message:
-            st.success(st.session_state.status_message)
-
-        st.markdown("---")
-        st.markdown(
-            "Use the UI to select a provider and mode. Only one worker loads at a time, and the chat runs one request at a time."
-        )
-
-    return provider, mode, local_model_path
-
-
-def render_main():
-    st.title("Agent Streamlit Interface")
-    st.write(
-        "A small interactive wrapper for your chatbot and ReAct agent. Select a provider, initialize a session, then send one prompt at a time."
-    )
-
-    if not st.session_state.session_ready or st.session_state.worker is None:
-        st.info("Configure the session from the sidebar and click Initialize to start.")
+    traces = recorder.load_all()
+    if not traces:
+        st.info("Run some tests in both modes first!")
         return
 
-    st.markdown(
-        f"<div class=\"status-pill\">Provider: {st.session_state.provider.upper()}</div>"
-        f"<div class=\"status-pill\">Mode: {st.session_state.mode.title()}</div>",
-        unsafe_allow_html=True,
-    )
+    all_inputs = list(set([t["input"] for t in traces]))
+    selected_input = st.selectbox("Select a query to compare", all_inputs)
 
-    with st.form(key="chat_form"):
-        prompt = st.text_area("Your message", key="input_message", height=180)
-        submitted = st.form_submit_button("Send")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("🤖 Chatbot")
+        c_trace = next((t for t in reversed(traces) if t["input"] == selected_input and t["mode"] == "chatbot"), None)
+        if c_trace:
+            st.info(c_trace["response"])
+            st.caption(f"Latency: {c_trace['latency_ms']}ms | Cost: ${c_trace['cost_estimate']:.5f}")
+        else: st.warning("No chatbot trace.")
 
-    if submitted:
-        if not prompt.strip():
-            st.warning("Please enter a message before sending.")
+    with col2:
+        st.subheader("🧠 ReAct Agent")
+        a_trace = next((t for t in reversed(traces) if t["input"] == selected_input and t["mode"] == "agent"), None)
+        if a_trace:
+            st.success(a_trace["response"])
+            st.caption(f"Latency: {a_trace['latency_ms']}ms | Steps: {a_trace['steps']} | Cost: ${a_trace['cost_estimate']:.5f}")
+            if a_trace.get("history"):
+                with st.expander("Reasoning Path"):
+                    for h in a_trace["history"]:
+                        st.write(f"🛠️ {h['action']} → 👁️ {h['observation']}")
+        else: st.warning("No agent trace.")
+
+def render_dashboard():
+    st.header("📊 Performance & Traces")
+    tabs = st.tabs(["Overview", "Side-by-Side Comparison", "Trace Tree (LangSmith)", "Raw Data"])
+
+    with tabs[0]:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Chatbot Baseline")
+            s = recorder.get_summary(mode="chatbot")
+            if s.get("total_cases", 0) > 0:
+                st.metric("Success Rate", f"{s['success_rate']}%")
+                st.metric("Avg Latency", f"{s['p50_latency_ms']}ms")
+                st.metric("Total Cost", f"${s['total_cost']:.4f}")
+            else: st.info("No data.")
+        with col2:
+            st.subheader("ReAct Agent")
+            s = recorder.get_summary(mode="agent")
+            if s.get("total_cases", 0) > 0:
+                st.metric("Success Rate", f"{s['success_rate']}%")
+                st.metric("Avg Steps", s['avg_steps'])
+                st.metric("Total Cost", f"${s['total_cost']:.4f}")
+            else: st.info("No data.")
+
+    with tabs[1]:
+        render_comparison()
+
+    with tabs[2]:
+        st.subheader("Trace Tree Analysis")
+        traces = trace_logger.load_traces(limit=10)
+        if not traces: st.info("No traces yet.")
         else:
-            try:
-                raw_response = st.session_state.worker.run(prompt)
-                response_text = raw_response.get("response") if isinstance(raw_response, dict) else str(raw_response)
-                latency = raw_response.get("latency_ms") if isinstance(raw_response, dict) else None
-                st.session_state.history.append(
-                    {
-                        "user": prompt,
-                        "ai": response_text,
-                        "latency": latency,
-                    }
-                )
-                st.session_state.input_message = ""
-            except Exception as exc:
-                st.error(f"Error running the session: {exc}")
+            selected_trace = st.selectbox("Select a trace to inspect",
+                                         options=range(len(traces)),
+                                         format_func=lambda i: f"{traces[i].get('start_time', 'N/A')} - {traces[i].get('input', 'N/A')[:40]}...",
+                                         index=len(traces)-1)
+            trace = traces[selected_trace]
+            st.write(f"**Model:** {trace['model']} | **Status:** {trace['status']} | **Total Latency:** {trace['latency_ms']}ms")
+            for child in trace["children"]:
+                render_node(child)
 
-    if st.session_state.history:
-        st.markdown("## Conversation")
-        for i, item in enumerate(st.session_state.history, start=1):
-            st.markdown(
-                f"<div class=\"chat-bubble chat-user\"><strong>You</strong><div>{item['user']}</div></div>"
-                f"<div class=\"chat-bubble chat-ai\"><strong>AI</strong><div>{item['ai']}</div>"
-                f"<div class=\"chat-meta\">Latency: {item['latency'] if item['latency'] is not None else 'n/a'} ms</div></div>",
-                unsafe_allow_html=True,
-            )
-    else:
-        st.markdown("<div class='card'><p class='subtext'>No conversation yet. Send your first prompt to start.</p></div>", unsafe_allow_html=True)
-
+    with tabs[3]:
+        st.subheader("Raw Metrics")
+        m = recorder.load_all()
+        if m:
+            import pandas as pd
+            st.dataframe(pd.DataFrame(m[::-1]))
 
 def main():
-    st.set_page_config(page_title="Agent Streamlit UI", layout="wide")
-    ensure_state()
-    inject_styles()
-    render_sidebar()
-    render_main()
+    st.set_page_config(page_title="Agent Tracer UI", layout="wide")
+    if "session_ready" not in st.session_state: st.session_state.session_ready = False
+    if "history" not in st.session_state: st.session_state.history = []
 
+    st.title("🛍️ Retail AI Assistant")
+    with st.sidebar:
+        st.header("Settings")
+        provider = st.selectbox("LLM Provider", ["hf", "openai"], format_func=lambda x: "Local Gemma 3" if x == "hf" else "NineRouter GPT-5")
+        mode = st.radio("Mode", ["chatbot", "agent"], index=1)
+        if st.button("Start/Reset Session"): initialize_session(mode.lower(), provider.lower())
+        if st.session_state.get("session_ready"):
+            st.success(f"Active: {st.session_state.mode.upper()} ({st.session_state.provider.upper()})")
+
+    main_tabs = st.tabs(["💬 Chat", "📊 Metrics & Traces"])
+    with main_tabs[0]:
+        if not st.session_state.session_ready: st.info("👈 Please initialize session to start.")
+        else: render_chat()
+    with main_tabs[1]: render_dashboard()
 
 if __name__ == "__main__":
     main()
